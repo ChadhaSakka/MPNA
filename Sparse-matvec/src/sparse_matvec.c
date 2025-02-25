@@ -64,20 +64,23 @@ void csr_matvec_serial(CSRMatrix *csr, double *x, double *y) {
 }
 
 void csr_matvec_distributed(CSRMatrix *csr, double *x, double *y, int rank, int size) {
-    int block_size = csr->n / size;
+    int block_size = csr->n / size;  // ici, 112/4 = 28
     int start_row = rank * block_size;
     int end_row = (rank == size - 1) ? csr->n : start_row + block_size;
-
-    // Local computation
+    int local_count = end_row - start_row;
+    
+    // Calcul local : chaque processus calcul pour ses lignes
     for (int i = start_row; i < end_row; i++) {
         y[i] = 0.0;
         for (int j = csr->row_ptr[i]; j < csr->row_ptr[i + 1]; j++) {
             y[i] += csr->values[j] * x[csr->col_ind[j]];
         }
     }
-
-    // Gather results to all processes
-    MPI_Allgather(MPI_IN_PLACE, 0, MPI_DOUBLE, y, block_size, MPI_DOUBLE, MPI_COMM_WORLD);
+    
+    // Rassembler les résultats locaux dans le vecteur global y.
+    // Chaque processus envoie ses local_count éléments (stockés à partir de y[start_row])
+    MPI_Allgather(y + start_row, local_count, MPI_DOUBLE,
+                  y, local_count, MPI_DOUBLE, MPI_COMM_WORLD);
 }
 
 void normalize(double *x, int n) {
@@ -95,7 +98,7 @@ double power_iteration(CSRMatrix *csr, int max_iter, double tol, int rank, int s
     double *x = malloc(csr->n * sizeof(double));
     double *y = malloc(csr->n * sizeof(double));
 
-    // Initialize x with uniform values (only rank 0 initializes, then broadcasts)
+    // Initialisation : seul le processus 0 initialise et diffuse ensuite
     if (rank == 0) {
         for (int i = 0; i < csr->n; i++) {
             x[i] = 1.0 / csr->n;
@@ -105,8 +108,12 @@ double power_iteration(CSRMatrix *csr, int max_iter, double tol, int rank, int s
     MPI_Bcast(x, csr->n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
     double lambda = 0.0, lambda_old = 0.0;
+    int converged = 0;
+
     for (int iter = 0; iter < max_iter; iter++) {
         csr_matvec_distributed(csr, x, y, rank, size);
+
+        // Le processus 0 normalise, calcule lambda et met à jour x
         if (rank == 0) {
             normalize(y, csr->n);
             lambda_old = lambda;
@@ -118,18 +125,21 @@ double power_iteration(CSRMatrix *csr, int max_iter, double tol, int rank, int s
                 printf("Iteration %d: lambda = %lf\n", iter, lambda);
             }
             if (fabs(lambda - lambda_old) < tol) {
-                printf("Converged at iteration %d with lambda = %lf\n", iter, lambda);
-                break;
+                printf("Convergence atteinte à l'itération %d avec lambda = %lf\n", iter, lambda);
+                converged = 1;
             }
             memcpy(x, y, csr->n * sizeof(double));
         }
+        // Diffusion du flag de convergence à tous les processus
+        MPI_Bcast(&converged, 1, MPI_INT, 0, MPI_COMM_WORLD);
         MPI_Bcast(x, csr->n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        if (converged) break;
     }
-
     free(x);
     free(y);
     return lambda;
 }
+
 
 void free_csr(CSRMatrix *csr) {
     free(csr->values);
