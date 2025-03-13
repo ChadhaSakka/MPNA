@@ -269,6 +269,7 @@ void write_solutions_to_file(const char *filename, double *u_explicit, double *u
     fclose(fp);
 }
 
+
 int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
     HYPRE_Init();
@@ -316,7 +317,7 @@ int main(int argc, char **argv) {
 
     // Sauvegarde des solutions dans un fichier pour post-traitement
     write_solutions_to_file("solutions.csv", u_explicit, u_implicit, u_newton, N, dx);
-
+  
     free_vector(u_explicit);
     free_vector(u_implicit);
     free_vector(u_newton);
