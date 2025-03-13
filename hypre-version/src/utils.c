@@ -24,6 +24,8 @@ double* alloc_vector(int n) {
 
 /**
  * @brief Libère la mémoire allouée pour un vecteur.
+ *
+ * @param v Pointeur sur le vecteur à libérer.
  */
 void free_vector(double *v) {
     free(v);
@@ -46,7 +48,7 @@ void print_vector(const double *v, int n) {
  * @brief Calcule le pas de temps dt en fonction de la solution u.
  *
  * dt est calculé à partir de la condition de stabilité :
- * dt < 2 / (4σ u_max^3 + 4κ(u_max)/(dx^2))
+ *     dt < 2 / (4σ u_max^3 + 4κ(u_max)/(dx^2))
  *
  * @param u      Vecteur solution (taille N+1).
  * @param N      Nombre de points.
@@ -66,3 +68,11 @@ double compute_dt(const double *u, int N, const parameters_t *params, double dx,
                             4.0 * compute_kappa(u_max, params) / (dx * dx));
 }
 
+
+double norm_vector(double *v, int n) {
+    double sum = 0.0;
+    for (int i = 0; i < n; i++) {
+        sum += v[i] * v[i];
+    }
+    return sqrt(sum / n);
+}

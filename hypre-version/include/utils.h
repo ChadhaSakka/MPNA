@@ -40,6 +40,6 @@ void print_vector(const double *v, int n);
  * @return double dt calculé.
  */
 double compute_dt(const double *u, int N, const parameters_t *params, double dx, double gamma);
-
+double norm_vector(double *v, int n);
 #endif // UTILS_H
 
