@@ -9,26 +9,13 @@
 #include "diffusion.h"
 #include "utils.h"
 
-// Méthode explicite avec sauvegarde des erreurs (optionnelle)
-void solve_explicit(double *u, int N, const parameters_t *params, double dx, double gamma, int *iter_out, double *final_diff, const char *error_filename) {
+// Méthode explicite
+void solve_explicit(double *u, int N, const parameters_t *params, double dx, double gamma, int *iter_out, double *final_diff) {
     double *u_new = alloc_vector(N + 1);
     double tol = 1e-6;
     int max_iter = 10000;
     int iter = 0;
     double diff = tol + 1.0;
-
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-    FILE *fp_error = NULL;
-    if (rank == 0 && error_filename != NULL) { // Sauvegarde uniquement si un fichier est spécifié
-        fp_error = fopen(error_filename, "w");
-        if (!fp_error) {
-            perror("Erreur lors de l'ouverture du fichier d'erreur");
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        fprintf(fp_error, "Iteration,Erreur\n");
-    }
 
     while (diff > tol && iter < max_iter) {
         double dt = compute_dt(u, N, params, dx, gamma);
@@ -48,16 +35,8 @@ void solve_explicit(double *u, int N, const parameters_t *params, double dx, dou
             u[i] = u_new[i];
         }
         diff /= (N + 1);
-        if (rank == 0 && fp_error != NULL) {
-            fprintf(fp_error, "%d,%e\n", iter, diff); // Sauvegarde si fichier spécifié
-        }
         iter++;
     }
-
-    if (rank == 0 && fp_error != NULL) {
-        fclose(fp_error);
-    }
-
     *iter_out = iter;
     *final_diff = diff;
     free_vector(u_new);
@@ -166,8 +145,8 @@ void solve_implicit(double *u, int N, const parameters_t *params, double dx, dou
     free_vector(Q);
 }
 
-// Méthode de Newton-Raphson avec HYPRE et sauvegarde du profil (optionnelle)
-void solve_newton(double *u, int N, const parameters_t *params, double dx, int *iter_out, double *final_diff, const char *profile_filename) {
+// Méthode de Newton-Raphson avec HYPRE
+void solve_newton(double *u, int N, const parameters_t *params, double dx, int *iter_out, double *final_diff) {
     int max_iter = 300;
     double tol = 1e-6;
     int iter = 0;
@@ -179,9 +158,6 @@ void solve_newton(double *u, int N, const parameters_t *params, double dx, int *
     HYPRE_ParCSRMatrix par_J;
     HYPRE_ParVector par_b, par_delta;
     HYPRE_Solver solver, precond;
-
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     while (iter < max_iter) {
         for (int i = 0; i <= N; i++) {
@@ -272,173 +248,79 @@ void solve_newton(double *u, int N, const parameters_t *params, double dx, int *
         HYPRE_ParCSRGMRESDestroy(solver);
         HYPRE_BoomerAMGDestroy(precond);
     }
-
-    // Sauvegarde du profil final si spécifié (uniquement sur le processus 0)
-    if (rank == 0 && profile_filename != NULL) {
-        FILE *fp_profile = fopen(profile_filename, "w");
-        if (!fp_profile) {
-            perror("Erreur lors de l'ouverture du fichier de profil");
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        fprintf(fp_profile, "x,u\n");
-        for (int i = 0; i <= N; i++) {
-            fprintf(fp_profile, "%e,%e\n", i * dx, u[i]);
-        }
-        fclose(fp_profile);
-    }
-
     *iter_out = iter;
     *final_diff = norm_vector(F, N + 1);
     free_vector(F);
     free_vector(u_new);
 }
-
-// Fonction pour sauvegarder les solutions des trois méthodes dans un fichier CSV
+ // Ajoutez cette fonction pour sauvegarder les solutions dans un fichier CSV
 void write_solutions_to_file(const char *filename, double *u_explicit, double *u_implicit, double *u_newton, int N, double dx) {
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
-    if (rank == 0) {
-        FILE *fp = fopen(filename, "w");
-        if (!fp) {
-            fprintf(stderr, "Erreur d'ouverture du fichier %s\n", filename);
-            return;
-        }
-        fprintf(fp, "x,u_explicit,u_implicit,u_newton\n");
-        for (int i = 0; i <= N; i++) {
-            double x = i * dx;
-            fprintf(fp, "%f,%f,%f,%f\n", x, u_explicit[i], u_implicit[i], u_newton[i]);
-        }
-        fclose(fp);
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "Erreur d'ouverture du fichier %s\n", filename);
+        return;
     }
+    // Entête du fichier CSV
+    fprintf(fp, "x,u_explicit,u_implicit,u_newton\n");
+    for (int i = 0; i <= N; i++) {
+        double x = i * dx;
+        fprintf(fp, "%f,%f,%f,%f\n", x, u_explicit[i], u_implicit[i], u_newton[i]);
+    }
+    fclose(fp);
 }
+
 
 int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
     HYPRE_Init();
 
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
     parameters_t params = {0.01, 0.1, 1.0, 0.5}; // kappa0, sigma, beta, q
-    double gamma_values[] = {0.05, 0.1, 0.2}; // Valeurs de gamma à tester
-    int N_values[] = {50, 100, 200}; // Valeurs de N à tester
-    int num_gamma = 3;
-    int num_N = 3;
+    int N = 100;
+    double dx = 1.0 / N;
+    double gamma = 0.1;
+    int iter_explicit, iter_implicit, iter_newton;
+    double diff_explicit, diff_implicit, diff_newton;
+    double t_explicit, t_implicit, t_newton;
 
-    if (rank == 0) {
-        printf("=== Résolution de l'équation de diffusion non linéaire ===\n");
-        printf("Paramètres: κ₀ = %g, σ = %g, β = %g, q = %g\n", params.kappa0, params.sigma, params.beta, params.q);
-    }
+    double *u_explicit = alloc_vector(N + 1);
+    double *u_implicit = alloc_vector(N + 1);
+    double *u_newton = alloc_vector(N + 1);
+    discretize_diffusion(u_explicit, N, &params, dx);
+    discretize_diffusion(u_implicit, N, &params, dx);
+    discretize_diffusion(u_newton, N, &params, dx);
 
-    // Partie 1 : Comparaison des trois méthodes (original)
-    if (rank == 0) {
-        printf("\n--- Comparaison des méthodes (N = 100, γ = 0.1) ---\n");
-    }
-    {
-        int N = 100;
-        double dx = 1.0 / N;
-        double gamma = 0.1;
-        int iter_explicit, iter_implicit, iter_newton;
-        double diff_explicit, diff_implicit, diff_newton;
-        double t_explicit, t_implicit, t_newton;
+    printf("=== Résolution de l'équation de diffusion non linéaire ===\n");
+    printf("Paramètres: κ₀ = %g, σ = %g, β = %g, q = %g\n", params.kappa0, params.sigma, params.beta, params.q);
+    printf("Grille: N = %d, dx = %g, γ = %g\n\n", N, dx, gamma);
 
-        double *u_explicit = alloc_vector(N + 1);
-        double *u_implicit = alloc_vector(N + 1);
-        double *u_newton = alloc_vector(N + 1);
-        discretize_diffusion(u_explicit, N, &params, dx);
-        discretize_diffusion(u_implicit, N, &params, dx);
-        discretize_diffusion(u_newton, N, &params, dx);
+    double start = MPI_Wtime();
+    solve_explicit(u_explicit, N, &params, dx, gamma, &iter_explicit, &diff_explicit);
+    t_explicit = MPI_Wtime() - start;
+    printf("Méthode explicite: %d itérations, erreur = %e, temps = %g s\n", iter_explicit, diff_explicit, t_explicit);
 
-        double start = MPI_Wtime();
-        solve_explicit(u_explicit, N, &params, dx, gamma, &iter_explicit, &diff_explicit, NULL); // Pas de fichier erreur ici
-        t_explicit = MPI_Wtime() - start;
-        if (rank == 0) {
-            printf("Méthode explicite: %d itérations, erreur = %e, temps = %g s\n", iter_explicit, diff_explicit, t_explicit);
-        }
+    start = MPI_Wtime();
+    solve_implicit(u_implicit, N, &params, dx, gamma, &iter_implicit, &diff_implicit);
+    t_implicit = MPI_Wtime() - start;
+    printf("Méthode implicite: %d itérations, erreur = %e, temps = %g s\n", iter_implicit, diff_implicit, t_implicit);
 
-        start = MPI_Wtime();
-        solve_implicit(u_implicit, N, &params, dx, gamma, &iter_implicit, &diff_implicit);
-        t_implicit = MPI_Wtime() - start;
-        if (rank == 0) {
-            printf("Méthode implicite: %d itérations, erreur = %e, temps = %g s\n", iter_implicit, diff_implicit, t_implicit);
-        }
+    start = MPI_Wtime();
+    solve_newton(u_newton, N, &params, dx, &iter_newton, &diff_newton);
+    t_newton = MPI_Wtime() - start;
+    printf("Méthode de Newton: %d itérations, erreur = %e, temps = %g s\n", iter_newton, diff_newton, t_newton);
 
-        start = MPI_Wtime();
-        solve_newton(u_newton, N, &params, dx, &iter_newton, &diff_newton, NULL); // Pas de fichier profil ici
-        t_newton = MPI_Wtime() - start;
-        if (rank == 0) {
-            printf("Méthode de Newton: %d itérations, erreur = %e, temps = %g s\n", iter_newton, diff_newton, t_newton);
-        }
+    printf("\nSolution finale (quelques points) - Méthode explicite:\n");
+    for (int i = 0; i <= N; i += N/5) printf("x = %.4f, u = %.6f\n", i * dx, u_explicit[i]);
+    printf("\nSolution finale - Méthode implicite:\n");
+    for (int i = 0; i <= N; i += N/5) printf("x = %.4f, u = %.6f\n", i * dx, u_implicit[i]);
+    printf("\nSolution finale - Méthode de Newton:\n");
+    for (int i = 0; i <= N; i += N/5) printf("x = %.4f, u = %.6f\n", i * dx, u_newton[i]);
 
-        if (rank == 0) {
-            printf("\nSolution finale (quelques points) - Méthode explicite:\n");
-            for (int i = 0; i <= N; i += N/5) printf("x = %.4f, u = %.6f\n", i * dx, u_explicit[i]);
-            printf("\nSolution finale - Méthode implicite:\n");
-            for (int i = 0; i <= N; i += N/5) printf("x = %.4f, u = %.6f\n", i * dx, u_implicit[i]);
-            printf("\nSolution finale - Méthode de Newton:\n");
-            for (int i = 0; i <= N; i += N/5) printf("x = %.4f, u = %.6f\n", i * dx, u_newton[i]);
-        }
-
-        write_solutions_to_file("solutions.csv", u_explicit, u_implicit, u_newton, N, dx);
-
-        free_vector(u_explicit);
-        free_vector(u_implicit);
-        free_vector(u_newton);
-    }
-
-    // Partie 2 : Influence de gamma (méthode explicite)
-    if (rank == 0) {
-        printf("\n--- Influence de gamma (Méthode explicite) ---\n");
-    }
-    for (int g = 0; g < num_gamma; g++) {
-        double gamma = gamma_values[g];
-        int N = 100; // N fixe pour cette analyse
-        double dx = 1.0 / N;
-        double *u_explicit = alloc_vector(N + 1);
-        int iter_explicit;
-        double diff_explicit;
-
-        discretize_diffusion(u_explicit, N, &params, dx);
-
-        char error_filename[50];
-        snprintf(error_filename, sizeof(error_filename), "erreur_gamma_%.2f.txt", gamma);
-
-        double start = MPI_Wtime();
-        solve_explicit(u_explicit, N, &params, dx, gamma, &iter_explicit, &diff_explicit, error_filename);
-        double t_explicit = MPI_Wtime() - start;
-
-        if (rank == 0) {
-            printf("γ = %.2f: %d itérations, erreur = %e, temps = %g s\n", gamma, iter_explicit, diff_explicit, t_explicit);
-        }
-        free_vector(u_explicit);
-    }
-
-    // Partie 3 : Influence du maillage (méthode de Newton)
-    if (rank == 0) {
-        printf("\n--- Influence du maillage (Méthode de Newton) ---\n");
-    }
-    for (int n = 0; n < num_N; n++) {
-        int N = N_values[n];
-        double dx = 1.0 / N;
-        double *u_newton = alloc_vector(N + 1);
-        int iter_newton;
-        double diff_newton;
-
-        discretize_diffusion(u_newton, N, &params, dx);
-
-        char profile_filename[50];
-        snprintf(profile_filename, sizeof(profile_filename), "profil_N_%d.txt", N);
-
-        double start = MPI_Wtime();
-        solve_newton(u_newton, N, &params, dx, &iter_newton, &diff_newton, profile_filename);
-        double t_newton = MPI_Wtime() - start;
-
-        if (rank == 0) {
-            printf("N = %d: %d itérations, erreur = %e, temps = %g s\n", N, iter_newton, diff_newton, t_newton);
-        }
-        free_vector(u_newton);
-    }
+    // Sauvegarde des solutions dans un fichier pour post-traitement
+    write_solutions_to_file("solutions.csv", u_explicit, u_implicit, u_newton, N, dx);
+  
+    free_vector(u_explicit);
+    free_vector(u_implicit);
+    free_vector(u_newton);
 
     HYPRE_Finalize();
     MPI_Finalize();
